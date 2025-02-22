@@ -1,0 +1,201 @@
+
+import dash
+from dash import dcc, html, Input, Output, State, ctx, MATCH, ALL
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+
+# Initialize Dash app
+app = dash.Dash(__name__)
+
+# Layout
+app.layout = html.Div([
+    html.H1("Specialized Savings & Investment Growth Simulation"),
+
+    html.Label("Current Age:"),
+    dcc.Input(id='current_age', type='number', value=25, step=1),
+
+    html.Label("Retirement Age:"),
+    dcc.Input(id='retirement_age', type='number', value=65, step=1),
+
+    html.Label("Number of Salary Stages:"),
+    dcc.Input(id='num_stages', type='number', value=1, step=1),
+
+    html.Button('Set Salary Stages', id='set_stages', n_clicks=0),
+
+    html.Div(id='salary_stages_container'),
+
+    html.Label("Saving Periods per Year:"),
+    dcc.Slider(id='periods_per_year', min=1, max=12, step=1, value=12, marks={i: str(i) for i in range(1, 13)}),
+
+    html.Label("Annual Growth Rate (%):"),
+    dcc.Input(id='annual_rate', type='number', value=8, step=0.1),
+
+    html.Label("Standard Deviation (%):"),
+    dcc.Input(id='std_dev', type='number', value=3, step=0.1),
+
+    html.Label("Inflation Rate (%):"),
+    dcc.Input(id='inflation_rate', type='number', value=3, step=0.1),
+
+    html.Button('Run Simulation', id='run_simulation', n_clicks=0),
+
+    dcc.Graph(id='savings-graph', style={'height': '800px'}),
+    dcc.Graph(id='salary-investment-graph', style={'height': '600px'})
+])
+
+# Generate dynamic input fields for salary stages
+@app.callback(
+    Output('salary_stages_container', 'children'),
+    Input('set_stages', 'n_clicks'),
+    State('num_stages', 'value'),
+    State({'type': 'dynamic-input', 'index': ALL}, 'value'),
+    prevent_initial_call=True
+)
+def create_salary_stages(n_clicks, num_stages, existing_inputs):
+    stages_inputs = []
+    for i in range(num_stages):
+        # Preserve existing values if available
+        start_age = existing_inputs[i * 4] if len(existing_inputs) > i * 4 else None
+        end_age = existing_inputs[i * 4 + 1] if len(existing_inputs) > i * 4 + 1 else None
+        monthly_salary = existing_inputs[i * 4 + 2] if len(existing_inputs) > i * 4 + 2 else None
+        saving_percentage = existing_inputs[i * 4 + 3] if len(existing_inputs) > i * 4 + 3 else None
+
+        stages_inputs.append(html.Div([
+            html.Label(f"Stage {i+1}: Age Range (Start - End)"),
+            dcc.Input(id={'type': 'dynamic-input', 'index': f'start_age_{i}'}, type='number', placeholder='Start Age', value=start_age, step=1),
+            dcc.Input(id={'type': 'dynamic-input', 'index': f'end_age_{i}'}, type='number', placeholder='End Age', value=end_age, step=1),
+
+            html.Label(f"Monthly Salary for Stage {i+1} (HUF):"),
+            dcc.Input(id={'type': 'dynamic-input', 'index': f'monthly_salary_{i}'}, type='number', placeholder='Monthly Salary', value=monthly_salary, step=1000),
+
+            html.Label(f"% of Salary to Invest in Stage {i+1} (%):"),
+            dcc.Input(id={'type': 'dynamic-input', 'index': f'saving_percentage_{i}'}, type='number', placeholder='Saving %', value=saving_percentage, step=1),
+        ]))
+    return stages_inputs
+
+# Function to calculate investments using monthly compounding with standard deviation
+
+def simulate_investments_monthly(stages, annual_rate, std_dev, periods_per_year, current_age, retirement_age, num_simulations=50):
+    months = list(range((18 - current_age) * 12, (90 - current_age) * 12 + 1))  # From age 18 to 90
+    salaries = []
+    investments = []
+    total_value = []
+    simulations = []
+
+    # Convert annual rate to effective monthly rate
+    monthly_rate = ((1 + annual_rate / 100) ** (1 / 12) - 1) * 12
+
+    for month in months:
+        year = current_age + month // 12
+        yearly_salary = 0
+        monthly_investment = 0
+        
+        # Sum overlapping stages for the current month
+        for stage in stages:
+            if stage['start_age'] <= year <= stage['end_age']:
+                yearly_salary += stage['monthly_salary'] * 12
+                monthly_investment += stage['monthly_salary'] * (stage['saving_percentage'] / 100)
+
+        salaries.append(yearly_salary / 12)  # Monthly salary
+        investments.append(monthly_investment)
+
+    # Run simulations
+    for _ in range(num_simulations):
+        simulated_values = []
+        current_value = 0
+        for month in range(len(months)):
+            growth_rate = np.random.normal(monthly_rate / 12, std_dev / 100 / 12)
+            current_value = current_value * (1 + growth_rate) + investments[month]
+            simulated_values.append(current_value)
+        simulations.append(simulated_values)
+
+    # Calculate future value line (mean of simulations)
+    total_value = np.mean(simulations, axis=0)
+
+    return months, salaries, investments, total_value, simulations
+
+# Update graphs
+@app.callback(
+    [Output('savings-graph', 'figure'), Output('salary-investment-graph', 'figure')],
+    Input('run_simulation', 'n_clicks'),
+    State('num_stages', 'value'),
+    State('periods_per_year', 'value'),
+    State('annual_rate', 'value'),
+    State('std_dev', 'value'),
+    State('inflation_rate', 'value'),
+    State('current_age', 'value'),
+    State('retirement_age', 'value'),
+    State({'type': 'dynamic-input', 'index': ALL}, 'value'),
+    prevent_initial_call=True
+)
+def update_graphs(n_clicks, num_stages, periods_per_year, annual_rate, std_dev, inflation_rate, current_age, retirement_age, dynamic_inputs):
+    if len(dynamic_inputs) != num_stages * 4:
+        print("Incomplete input values detected.")
+        return dash.no_update, dash.no_update  # Avoid IndexError if inputs are incomplete
+
+    stages = []
+    for i in range(num_stages):
+        stage_data = {
+            'start_age': dynamic_inputs[i * 4],
+            'end_age': dynamic_inputs[i * 4 + 1],
+            'monthly_salary': dynamic_inputs[i * 4 + 2],
+            'saving_percentage': dynamic_inputs[i * 4 + 3]
+        }
+        if None in stage_data.values():
+            print(f"Missing data in stage {i+1}.")
+            return dash.no_update, dash.no_update
+        stages.append(stage_data)
+
+    months, salaries, investments, total_value, simulations = simulate_investments_monthly(
+        stages, annual_rate, std_dev, periods_per_year, current_age, retirement_age
+    )
+
+    if not months:
+        print("No data generated for simulation.")
+        return dash.no_update, dash.no_update
+
+    # Convert months to ages for x-axis
+    ages = [current_age + (month / 12) for month in months]
+
+    # Calculate present value line by discounting future value using inflation rate
+    present_value = [fv / ((1 + inflation_rate / 100) ** (age - current_age)) for fv, age in zip(total_value, ages)]
+
+    # Set y-axis maximum based on present value at age 90
+    max_present_value = present_value[-1] * 6
+
+    # Main savings graph
+    savings_fig = go.Figure()
+    savings_fig.add_trace(go.Scatter(x=ages, y=total_value, mode='lines', line=dict(color='blue', width=3), name='Future Value (HUF)'))
+    savings_fig.add_trace(go.Scatter(x=ages, y=present_value, mode='lines', line=dict(color='orange', width=3, dash='dash'), name='Present Value (HUF)'))
+    
+    # Add simulations
+    for simulation in simulations:
+        savings_fig.add_trace(go.Scatter(x=ages, y=simulation, mode='lines', line=dict(color='black', width=0.5), opacity=0.5, showlegend=False))
+
+    savings_fig.add_vline(x=current_age, line=dict(color='red', dash='dash'), name='Current Age')
+    savings_fig.add_vline(x=retirement_age, line=dict(color='green', dash='dash'), name='Retirement Age')
+    savings_fig.update_layout(
+        title="Investment Value Over Time",
+        xaxis_title="Age",
+        yaxis_title="Value (HUF)",
+        xaxis=dict(range=[18, 90]),
+        yaxis=dict(range=[0, max_present_value])
+    )
+
+    # Salary vs Investment graph
+    salary_invest_fig = go.Figure()
+    salary_invest_fig.add_trace(go.Bar(x=ages, y=salaries, name='Monthly Salary (HUF)'))
+    salary_invest_fig.add_trace(go.Bar(x=ages, y=investments, name='Monthly Investment (HUF)'))
+    salary_invest_fig.update_layout(
+        barmode='group',
+        title="Monthly Salary vs Investment",
+        xaxis_title="Age",
+        yaxis_title="Amount (HUF)",
+        xaxis=dict(range=[18, 90])
+    )
+
+    return savings_fig, salary_invest_fig
+
+# Run app
+if __name__ == '__main__':
+    app.run_server(debug=True)
